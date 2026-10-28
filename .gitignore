@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Data clones
+data_repo_clone/
+
+# Sessions / state
+sessions/
+*.state.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

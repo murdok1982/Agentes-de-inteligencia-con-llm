@@ -1,0 +1,7 @@
+pydantic>=2.0
+python-dotenv>=1.0
+httpx>=0.27
+playwright>=1.40
+telethon>=1.34
+exifread>=3.0
+youtube-transcript-api>=0.6
