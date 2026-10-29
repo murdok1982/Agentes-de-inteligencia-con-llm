@@ -112,3 +112,17 @@ Ver `.env.example`. **Nunca** subas el archivo `.env` al repositorio.
 ## Licencia
 
 No se ha especificado una licencia para este repositorio. Uso interno/educativo salvo indicación contraria.
+---
+
+## Agentes del proyecto OSINT Nexus
+
+Este repositorio incluye los agentes del proyecto OSINT Nexus en las mismas rutas que el repositorio de la base de datos:
+
+- `apps/agents/hermes/`: harness Hermes v3.1 (allowlist de tools, OPSEC fail-closed, idempotencia).
+- `apps/informant-agent/`: Informante IA (pre-vuelo, extracción referenciada, cliente M2M).
+- `contracts/`: contratos sellados que consumen los agentes (`extraction-schema.json`, `openapi.yaml`, `v3/hermes-tools.json`, `v3/agent-contracts.json`).
+- `.opencode/agents/` y `.antigravity/`: definiciones y prompts de los agentes.
+
+**Fuente de verdad:** el repositorio [DataBaseInt-Osint-socmint-Sigint](https://github.com/murdok1982/DataBaseInt-Osint-socmint-Sigint). Esta copia se sincroniza desde allí; no editar aquí sin llevar el cambio al repositorio de origen.
+
+Tests: `cd apps/agents/hermes && python -m pytest -q` y `cd apps/informant-agent && python -m pytest -q`.

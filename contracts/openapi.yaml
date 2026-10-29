@@ -1,0 +1,1211 @@
+openapi: 3.1.0
+info:
+  title: OSINT Nexus API
+  version: 3.1.0
+  description: >
+    Contrato compartido Backend (FastAPI) ↔ Frontend (React) ↔ Informant Agent.
+    Deriva de SPEC-01/02/03/04 v3.1 y SPEC-06. Estado: SELLADO v3.1.0 (2026-10-26).
+    Autenticación: JWT Bearer (humanos) o API Key M2M (AI_INFORMANT).
+    Toda respuesta incluye la cabecera X-Request-ID (SPEC-06 §1.3).
+  license:
+    name: Proprietary
+servers:
+  - url: https://api.osint-nexus.local/api/v1
+tags:
+  - name: auth
+    description: Autenticación de operadores (JWT + refresh cookie HttpOnly)
+  - name: graph
+    description: Exploración del grafo de conocimiento (nodos, aristas, vecindad)
+  - name: context
+    description: Pre-Flight Context Check (Fase 0) para el Informante IA
+  - name: ingest
+    description: Subida y procesamiento de informes OSINT (analista e informante IA)
+  - name: reports
+    description: Acceso a informes originales y evidencia textual
+  - name: analyses
+    description: Expedientes analíticos humanos y requerimientos de inteligencia
+  - name: coherence
+    description: Bandeja de coherencia (alertas de contradicción/corroboración)
+  - name: search
+    description: Consultas GraphRAG en lenguaje natural
+  - name: correlation
+    description: Colocalización SIGINT-SOCMINT/OSINT (PostGIS, sólo lectura)
+  - name: analytics
+    description: Señales de evasión de alias (rotación, multiplataforma, colisión)
+  - name: proposals
+    description: Cuarentena y aprobación humana de propuestas de agentes
+  - name: evidence
+    description: Inspector y verificación de la cadena de custodia
+  - name: system
+    description: Salud y metadatos del servicio
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: authLogin
+      summary: Login del operador (JWT; 2FA obligatorio para ADMIN, SPEC-04 §2)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: OK (setea cookie refresh HttpOnly/Secure)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: authRefresh
+      summary: Renueva el access token (cookie refresh)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: authLogout
+      summary: Invalida el refresh token
+      responses:
+        '204': { description: Sin contenido }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: authMe
+      summary: Perfil y rol del operador
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /graph/nodes:
+    get:
+      tags: [graph]
+      operationId: listGraphNodes
+      summary: Lista/filtra nodos (VIEWER+)
+      parameters:
+        - { name: label, in: query, schema: { $ref: '#/components/schemas/EntityLabel' } }
+        - { name: q, in: query, schema: { type: string }, description: 'Búsqueda de texto libre (fulltext) sobre nombre/alias/valor.' }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: min_confidence, in: query, schema: { type: number, minimum: 0, maximum: 1 } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/GraphNode' } }
+                  next_cursor: { type: [string, 'null'] }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /graph/nodes/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [graph]
+      operationId: getGraphNode
+      summary: Ficha completa de nodo (VIEWER+)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GraphNode' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [graph]
+      operationId: updateGraphNode
+      summary: Edita/fusiona nodo; respeta locked_by_analyst (ANALYST+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GraphNodeUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GraphNode' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [graph]
+      operationId: deleteGraphNode
+      summary: Borra nodo (ADMIN)
+      responses:
+        '204': { description: Sin contenido }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /graph/nodes/{id}/lock:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [graph]
+      operationId: lockGraphNode
+      summary: Bloquea un nodo verificado por el analista (ANALYST+)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                locked: { type: boolean, default: true }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GraphNode' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /graph/edges:
+    get:
+      tags: [graph]
+      operationId: listGraphEdges
+      summary: Lista/filtra aristas (VIEWER+)
+      parameters:
+        - { name: min_confidence, in: query, schema: { type: number, minimum: 0, maximum: 1 } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/GraphEdge' } }
+
+  /graph/neighborhood/{id}:
+    get:
+      tags: [graph]
+      operationId: getGraphNeighborhood
+      summary: Vecindad a N saltos (VIEWER+)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: depth, in: query, schema: { type: integer, minimum: 1, maximum: 3, default: 1 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subgraph' }
+
+  /context/preflight:
+    post:
+      tags: [context]
+      operationId: postContextPreflight
+      summary: Pre-Flight Context Check (Fase 0) (AI_INFORMANT | ANALYST)
+      description: >
+        Devuelve los Analysis activos, los IntelRequirement abiertos y el
+        diccionario de entidades canónicas. Obligatorio antes de
+        /ingest/informant (Regla 3: prohibición de ingesta ciega).
+      security:
+        - apiKeyAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PreflightRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PreflightResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /ingest:
+    post:
+      tags: [ingest]
+      operationId: createIngestJob
+      summary: Sube informe OSINT multipart (ANALYST+)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, title]
+              properties:
+                file: { type: string, format: binary }
+                title: { type: string }
+      responses:
+        '202':
+          description: Aceptado (job creado)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IngestJob' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /ingest/informant:
+    post:
+      tags: [ingest]
+      operationId: createInformantIngestJob
+      summary: Ingesta del Informante IA, con vínculos analíticos (AI_INFORMANT)
+      description: >
+        Exclusivo del principal M2M `AI_INFORMANT`. Requiere un
+        `X-Preflight-Token` vigente (obtenido en /context/preflight); sin él
+        responde 409. El campo `payload` debe validar contra
+        contracts/extraction-schema.json (tripletas + analytical_context_links).
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - { name: X-Preflight-Token, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, payload]
+              properties:
+                file: { type: string, format: binary }
+                payload: { type: string, description: 'JSON validado contra extraction-schema.json' }
+      responses:
+        '202':
+          description: Aceptado (job creado)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IngestJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /ingest/{job_id}:
+    get:
+      tags: [ingest]
+      operationId: getIngestJob
+      summary: Estado del job de ingesta (VIEWER+)
+      parameters:
+        - { name: job_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IngestJob' }
+
+  /ingest/{job_id}/ws:
+    get:
+      tags: [ingest]
+      operationId: ingestProgressWs
+      summary: Progreso en vivo por WebSocket (VIEWER+)
+      description: >
+        Autenticación por cookie de sesión (same-origin). Los mensajes son JSON
+        con la forma de IngestJob ({job_id, status, progress, pending_review}).
+        Códigos de cierre: 4401 (no autenticado), 4403 (rol insuficiente),
+        4404 (job inexistente), 4503 (servicio no disponible).
+      parameters:
+        - { name: job_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '101': { description: Cambio de protocolo a WebSocket }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /reports/{id}:
+    get:
+      tags: [reports]
+      operationId: getReport
+      summary: Metadatos del informe (VIEWER+)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Report' }
+
+  /reports/{id}/file:
+    get:
+      tags: [reports]
+      operationId: getReportFile
+      summary: Streaming del PDF/documento original para el visor (VIEWER+)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Documento original
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /reports/{id}/chunks:
+    get:
+      tags: [reports]
+      operationId: getReportChunks
+      summary: Chunks con coordenadas para subrayado (VIEWER+)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Chunk' } }
+
+  /analyses:
+    get:
+      tags: [analyses]
+      operationId: listAnalyses
+      summary: Lista expedientes analíticos (VIEWER+)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [ACTIVE, UNDER_REVIEW, CLOSED] } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Analysis' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [analyses]
+      operationId: createAnalysis
+      summary: Crea un expediente analítico (ANALYST+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnalysisCreate' }
+      responses:
+        '201':
+          description: Creado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Analysis' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /analyses/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [analyses]
+      operationId: getAnalysis
+      summary: Ficha del expediente analítico (VIEWER+)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Analysis' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [analyses]
+      operationId: updateAnalysis
+      summary: Edita tesis/conclusión/estado (ANALYST+; única autoridad humana)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnalysisUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Analysis' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /analyses/{id}/requirements:
+    post:
+      tags: [analyses]
+      operationId: createIntelRequirement
+      summary: Crea un requerimiento de inteligencia (RFI) (ANALYST+)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IntelRequirementCreate' }
+      responses:
+        '201':
+          description: Creado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IntelRequirement' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    get:
+      tags: [analyses]
+      operationId: listAnalysisRequirements
+      summary: Lista los RFI del expediente (VIEWER+)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/IntelRequirement' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /coherence/alerts:
+    get:
+      tags: [coherence]
+      operationId: listCoherenceAlerts
+      summary: Bandeja de coherencia (ANALYST+)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [PENDING_ANALYST, RESOLVED, DISMISSED] } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/CoherenceAlert' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /coherence/alerts/{alert_id}/resolve:
+    patch:
+      tags: [coherence]
+      operationId: resolveCoherenceAlert
+      summary: Resuelve o descarta una alerta (ANALYST+)
+      parameters:
+        - { name: alert_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoherenceAlertResolve' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoherenceAlert' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /search/rag:
+    post:
+      tags: [search]
+      operationId: searchRag
+      summary: Consulta GraphRAG en lenguaje natural (VIEWER+)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        '200':
+          description: OK (con citas de informes OSINT y análisis humanos)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RagResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /correlation/colocation:
+    post:
+      tags: [correlation]
+      operationId: findSigintSocmintColocation
+      summary: Colocalización SIGINT-SOCMINT/OSINT en un radio y ventana (VIEWER+)
+      description: >
+        Ejecuta PostGIS y devuelve clusters con evidencia; el TLP solicitado no
+        puede superar el clearance del rol. No escribe en el grafo.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ColocationRequest' }
+      responses:
+        '200':
+          description: Clusters ordenados por score
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ColocationResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /graph/subgraph:
+    post:
+      tags: [graph]
+      operationId: getMultiLayerSubgraph
+      summary: Subgrafo multicapa con validez temporal as_of (VIEWER+)
+      description: >
+        Expande raíces hasta `depth`, filtra por disciplina, Almirantazgo,
+        confianza y TLP. `include_staged` sólo está permitido a ANALYST/ADMIN.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubgraphRequest' }
+      responses:
+        '200':
+          description: Nodos y aristas visibles
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubgraphResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+
+  /analytics/alias-evasion:
+    post:
+      tags: [analytics]
+      operationId: detectAliasEvasion
+      summary: Señales de rotación/colisión de alias (VIEWER+)
+      description: >
+        Devuelve RAPID_ALIAS_ROTATION, CROSS_PLATFORM_REUSE y ALIAS_COLLISION.
+        Una señal no crea ALIAS_OF ni fusiona entidades.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AliasEvasionRequest' }
+      responses:
+        '200':
+          description: Señales explicables
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AliasEvasionResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /proposals:
+    get:
+      tags: [proposals]
+      operationId: listProposals
+      summary: Lista propuestas en cuarentena (ANALYST+)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [AGENT_STAGED, ANALYST_VERIFIED, APPLIED, REJECTED, EXPIRED] } }
+        - { name: mission_id, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 500 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Lista paginada con version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProposalList' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /proposals/{proposal_id}:
+    get:
+      tags: [proposals]
+      operationId: getProposal
+      summary: Propuesta + evidencia + diff (ANALYST+)
+      parameters:
+        - { name: proposal_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Propuesta
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Proposal' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /proposals/{proposal_id}/approve:
+    post:
+      tags: [proposals]
+      operationId: approveProposal
+      summary: Autoriza una propuesta (ANALYST+; no escribe el grafo)
+      parameters:
+        - { name: proposal_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProposalDecision' }
+      responses:
+        '200':
+          description: Propuesta en ANALYST_VERIFIED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Proposal' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /proposals/{proposal_id}/reject:
+    post:
+      tags: [proposals]
+      operationId: rejectProposal
+      summary: Rechaza una propuesta con motivo (ANALYST+)
+      parameters:
+        - { name: proposal_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProposalDecision' }
+      responses:
+        '200':
+          description: Propuesta en REJECTED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Proposal' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /evidence/{evidence_id}:
+    get:
+      tags: [evidence]
+      operationId: getEvidence
+      summary: Metadatos y payload de evidencia (VIEWER+, TLP aplicado)
+      parameters:
+        - { name: evidence_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Evidencia visible
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Evidence' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /evidence/{evidence_id}/verify:
+    get:
+      tags: [evidence]
+      operationId: verifyEvidence
+      summary: Verifica SHA-256 y cadena de custodia (ANALYST+)
+      parameters:
+        - { name: evidence_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Resultado de verificación
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EvidenceVerification' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /info:
+    get:
+      tags: [system]
+      operationId: getInfo
+      summary: Salud y metadatos del servicio (público)
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  version: { type: string }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API Key M2M del Informante IA (AI_INFORMANT)
+
+  schemas:
+    EntityLabel:
+      type: string
+      enum: [Person, Organization, CyberAsset, Location, Event, Report, Analysis, IntelRequirement, CoherenceAlert]
+
+    GraphNode:
+      type: object
+      required: [id, label]
+      properties:
+        id: { type: string, format: uuid }
+        label: { $ref: '#/components/schemas/EntityLabel' }
+        canonical_name: { type: string }
+        aliases: { type: array, items: { type: string } }
+        risk_score: { type: number, minimum: 0, maximum: 1 }
+        locked_by_analyst: { type: boolean }
+        attributes: { type: object, additionalProperties: true }
+
+    GraphNodeUpdate:
+      type: object
+      description: Solo campos editables/fusionables. Rechazado (409) si el nodo está bloqueado.
+      properties:
+        canonical_name: { type: string }
+        aliases: { type: array, items: { type: string } }
+        merge_with: { type: array, items: { type: string, format: uuid } }
+        attributes: { type: object, additionalProperties: true }
+
+    GraphEdge:
+      type: object
+      required: [id, from, to, type, confidence, source_report_id, exact_quote, page_number, first_seen, last_seen]
+      properties:
+        id: { type: string }
+        from: { type: string, format: uuid }
+        to: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [CONTROLS, FINANCED, USES_ASSET, LOCATED_AT, ASSOCIATED_WITH, PARTICIPATED_IN, MENTIONED_IN, INVESTIGATES, HAS_REQUIREMENT, CITES_ANALYSIS, CORROBORATES, CONTRADICTS, EXTENDS, ANSWERS_REQUIREMENT, RAISED_FOR, ABOUT]
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        source_report_id: { type: string, format: uuid }
+        exact_quote: { type: string }
+        page_number: { type: integer, minimum: 1 }
+        locked_by_analyst: { type: boolean }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+
+    Subgraph:
+      type: object
+      properties:
+        nodes: { type: array, items: { $ref: '#/components/schemas/GraphNode' } }
+        edges: { type: array, items: { $ref: '#/components/schemas/GraphEdge' } }
+
+    Report:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        source_type: { type: string, enum: [OSINT_PDF, NEWS, TELEGRAM, RSS, MANUAL, PUBLIC_REGISTRY] }
+        file_path: { type: string }
+        ingested_by_role: { type: string, enum: [ANALYST, AI_INFORMANT] }
+        ingested_at: { type: string, format: date-time }
+        reliability_rating: { type: string, enum: [A, B, C, D, E, F] }
+
+    Chunk:
+      type: object
+      properties:
+        chunk_id: { type: string }
+        page_number: { type: integer, minimum: 1 }
+        char_start: { type: integer, minimum: 0 }
+        char_end: { type: integer, minimum: 0 }
+        text: { type: string }
+
+    IngestJob:
+      type: object
+      properties:
+        job_id: { type: string }
+        status: { type: string, enum: [QUEUED, PROCESSING, DONE, FAILED] }
+        progress: { type: number, minimum: 0, maximum: 1 }
+        pending_review: { type: integer }
+
+    PreflightRequest:
+      type: object
+      required: [keywords]
+      properties:
+        keywords: { type: array, items: { type: string }, minItems: 1 }
+        entity_hints: { type: array, items: { type: string } }
+
+    PreflightResponse:
+      type: object
+      required: [preflight_token, analyses, requirements, canonical_entities]
+      properties:
+        preflight_token: { type: string, description: 'Token efímero exigido por /ingest/informant' }
+        analyses:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              code: { type: string }
+              thesis_summary: { type: string }
+        requirements:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              question: { type: string }
+              priority: { type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW] }
+        canonical_entities:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              label: { $ref: '#/components/schemas/EntityLabel' }
+              canonical_name: { type: string }
+
+    Analysis:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        title: { type: string }
+        thesis_summary: { type: string }
+        conclusion_body: { type: string }
+        status: { type: string, enum: [ACTIVE, UNDER_REVIEW, CLOSED] }
+        author_analyst_id: { type: string, format: uuid }
+        coherence_score: { type: number, minimum: 0, maximum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    AnalysisCreate:
+      type: object
+      required: [code, title, thesis_summary]
+      properties:
+        code: { type: string }
+        title: { type: string }
+        thesis_summary: { type: string }
+        conclusion_body: { type: string }
+
+    AnalysisUpdate:
+      type: object
+      properties:
+        title: { type: string }
+        thesis_summary: { type: string }
+        conclusion_body: { type: string }
+        status: { type: string, enum: [ACTIVE, UNDER_REVIEW, CLOSED] }
+
+    IntelRequirement:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        question: { type: string }
+        priority: { type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW] }
+        status: { type: string, enum: [OPEN, ANSWERED] }
+        parent_analysis_id: { type: string, format: uuid }
+        target_entity_id: { type: string, format: uuid }
+
+    IntelRequirementCreate:
+      type: object
+      required: [question, priority]
+      properties:
+        question: { type: string }
+        priority: { type: string, enum: [CRITICAL, HIGH, MEDIUM, LOW] }
+        target_entity_id: { type: string, format: uuid }
+
+    CoherenceAlert:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        alert_type: { type: string, enum: [CONTRADICTION, HIGH_VALUE_CORROBORATION, NEW_ALIAS_MERGE] }
+        status: { type: string, enum: [PENDING_ANALYST, RESOLVED, DISMISSED] }
+        description: { type: string }
+        analysis_id: { type: string, format: uuid }
+        entity_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+
+    CoherenceAlertResolve:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [RESOLVED, DISMISSED] }
+        resolution_note: { type: string }
+
+    RagResponse:
+      type: object
+      required: [answer, citations]
+      properties:
+        answer: { type: string }
+        subgraph: { $ref: '#/components/schemas/Subgraph' }
+        citations:
+          type: array
+          items:
+            type: object
+            required: [exact_quote]
+            properties:
+              report_id: { type: string, format: uuid }
+              analysis_id: { type: string, format: uuid }
+              page_number: { type: integer, minimum: 1 }
+              exact_quote: { type: string }
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+        totp_code: { type: string, pattern: '^[0-9]{6}$', description: 'TOTP RFC 6238 (obligatorio para ADMIN, SPEC-04 §2)' }
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [bearer] }
+        expires_in: { type: integer, maximum: 900, description: 'Segundos; 900 = 15 min (SPEC-04 §2 v2.2)' }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        role: { type: string, enum: [ADMIN, ANALYST, VIEWER] }
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+
+    GeoPoint:
+      type: object
+      required: [lat, lon]
+      additionalProperties: false
+      properties:
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lon: { type: number, minimum: -180, maximum: 180 }
+
+    TimeWindow:
+      type: object
+      required: [from, to]
+      additionalProperties: false
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+
+    ColocationRequest:
+      type: object
+      required: [mission_id, center, window, disciplines]
+      additionalProperties: false
+      properties:
+        mission_id: { type: string, format: uuid }
+        center: { $ref: '#/components/schemas/GeoPoint' }
+        radius_m: { type: number, minimum: 10, maximum: 5000, default: 500 }
+        window: { $ref: '#/components/schemas/TimeWindow' }
+        disciplines:
+          type: array
+          minItems: 2
+          items: { type: string, enum: [OSINT, SOCMINT, SIGINT, HUMINT, TECHINT, FININT, GEOINT, MIXED] }
+        min_confidence: { type: integer, minimum: 0, maximum: 100, default: 60 }
+        max_tlp: { type: string, enum: [TLP:CLEAR, TLP:GREEN, TLP:AMBER, 'TLP:AMBER+STRICT', TLP:RED] }
+        max_time_delta_s: { type: integer, minimum: 0, maximum: 86400, default: 900 }
+        limit: { type: integer, minimum: 1, maximum: 500, default: 200 }
+
+    ColocationEvent:
+      type: object
+      additionalProperties: true
+      properties:
+        event_id: { type: string, format: uuid }
+        discipline: { type: string, enum: [SIGINT, SOCMINT, OSINT] }
+        event_type: { type: string }
+        event_time: { type: string, format: date-time }
+        distance_m: { type: number }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        tlp: { type: string }
+        entity_id: { type: string, format: uuid }
+        observable_id: { type: string, format: uuid }
+        masked_selector: { type: string }
+        evidence_ids: { type: array, items: { type: string, format: uuid } }
+
+    ColocationCluster:
+      type: object
+      additionalProperties: true
+      properties:
+        cluster_id: { type: string }
+        center: { $ref: '#/components/schemas/GeoPoint' }
+        radius_m: { type: number }
+        score: { type: number, minimum: 0, maximum: 1 }
+        disciplines: { type: array, items: { type: string } }
+        events: { type: array, items: { $ref: '#/components/schemas/ColocationEvent' } }
+        time_delta_s: { type: number }
+        evidence_ids: { type: array, items: { type: string, format: uuid } }
+
+    ColocationResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        query: { type: object, additionalProperties: true }
+        clusters: { type: array, items: { $ref: '#/components/schemas/ColocationCluster' } }
+        truncated: { type: boolean }
+        next_cursor: { type: [string, 'null'] }
+        suppressed: { type: integer, minimum: 0 }
+
+    SubgraphRequest:
+      type: object
+      required: [mission_id, root_ids]
+      additionalProperties: false
+      properties:
+        mission_id: { type: string, format: uuid }
+        root_ids: { type: array, minItems: 1, maxItems: 20, items: { type: string, format: uuid } }
+        depth: { type: integer, minimum: 1, maximum: 5, default: 2 }
+        direction: { type: string, enum: [OUT, IN, BOTH], default: BOTH }
+        disciplines: { type: array, items: { type: string } }
+        admiralty_min: { type: string, pattern: '^[A-F][1-6]$' }
+        admiralty_max: { type: string, pattern: '^[A-F][1-6]$' }
+        min_confidence: { type: integer, minimum: 0, maximum: 100 }
+        max_tlp: { type: string }
+        as_of: { type: string, format: date-time }
+        include_staged: { type: boolean, default: false }
+        max_nodes: { type: integer, minimum: 1, maximum: 500, default: 300 }
+        max_edges: { type: integer, minimum: 1, maximum: 2000, default: 1200 }
+        cursor: { type: [string, 'null'] }
+
+    SubgraphResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        nodes: { type: array, items: { type: object, additionalProperties: true } }
+        edges: { type: array, items: { type: object, additionalProperties: true } }
+        truncated: { type: boolean }
+        next_cursor: { type: [string, 'null'] }
+        as_of: { type: string, format: date-time }
+
+    AliasEvasionRequest:
+      type: object
+      required: [mission_id, window]
+      additionalProperties: false
+      properties:
+        mission_id: { type: string, format: uuid }
+        entity_id: { type: [string, 'null'], format: uuid }
+        window: { $ref: '#/components/schemas/TimeWindow' }
+        min_aliases: { type: integer, minimum: 2, maximum: 50, default: 3 }
+        min_platforms: { type: integer, minimum: 1, maximum: 20, default: 2 }
+        max_gap_hours: { type: number, minimum: 0.01, maximum: 720, default: 48 }
+        similarity_threshold: { type: number, minimum: 0, maximum: 1, default: 0.55 }
+        max_tlp: { type: string }
+        limit: { type: integer, minimum: 1, maximum: 500, default: 100 }
+
+    AliasSignal:
+      type: object
+      additionalProperties: true
+      properties:
+        signal_id: { type: string }
+        signal_type: { type: string, enum: [RAPID_ALIAS_ROTATION, CROSS_PLATFORM_REUSE, ALIAS_COLLISION] }
+        entity_id: { type: [string, 'null'], format: uuid }
+        observable_id: { type: [string, 'null'], format: uuid }
+        score: { type: number, minimum: 0, maximum: 1 }
+        occurrences: { type: integer }
+        max_gap_hours: { type: [number, 'null'] }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        aliases: { type: array, items: { type: string } }
+        platforms: { type: array, items: { type: string } }
+        evidence_ids: { type: array, items: { type: string, format: uuid } }
+        explanation: { type: string }
+
+    AliasEvasionResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        signals: { type: array, items: { $ref: '#/components/schemas/AliasSignal' } }
+        truncated: { type: boolean }
+        suppressed: { type: integer }
+
+    Proposal:
+      type: object
+      additionalProperties: true
+      properties:
+        proposal_id: { type: string, format: uuid }
+        proposal_type: { type: string, enum: [OBSERVABLE, RELATIONSHIP, EVENT, ENTITY_MERGE, ALIAS] }
+        status: { type: string, enum: [AGENT_STAGED, ANALYST_VERIFIED, APPLIED, REJECTED, EXPIRED] }
+        mission_id: { type: string, format: uuid }
+        agent_type: { type: string }
+        target_entity_id: { type: [string, 'null'], format: uuid }
+        payload: { type: object, additionalProperties: true }
+        evidence_ids: { type: array, items: { type: string, format: uuid } }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        reviewed_by: { type: [string, 'null'] }
+        reviewed_at: { type: [string, 'null'], format: date-time }
+        decision_reason: { type: [string, 'null'] }
+
+    ProposalList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Proposal' } }
+        truncated: { type: boolean }
+        next_cursor: { type: [string, 'null'] }
+
+    ProposalDecision:
+      type: object
+      required: [reason, version]
+      additionalProperties: false
+      properties:
+        reason: { type: string, minLength: 8, maxLength: 2000 }
+        version: { type: integer, minimum: 1 }
+
+    Evidence:
+      type: object
+      additionalProperties: true
+      properties:
+        evidence_id: { type: string, format: uuid }
+        payload_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        tlp: { type: string }
+        collector_agent: { type: string }
+        source_type: { type: string }
+        source_uri: { type: string }
+        captured_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        payload: { type: object, additionalProperties: true }
+        metadata: { type: object, additionalProperties: true }
+
+    EvidenceVerification:
+      type: object
+      properties:
+        evidence_id: { type: string, format: uuid }
+        valid: { type: boolean }
+        stored_sha256: { type: string }
+        computed_sha256: { type: string }
+        chain_valid: { type: boolean }
+        checked_at: { type: string, format: date-time }
+
+  responses:
+    Unauthorized:
+      description: No autenticado
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Rol insuficiente (RBAC SPEC-04)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No encontrado
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Conflicto (p. ej. ingesta ciega sin Pre-Flight, o nodo bloqueado)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: Demasiados intentos fallidos de login (SPEC-04 §2.1)
+      headers:
+        Retry-After:
+          description: Segundos hasta que se levante el bloqueo
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationError:
+      description: Petición inválida (EARS/contrato)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PayloadTooLarge:
+      description: Se excedió el límite de nodos/aristas de la consulta
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
